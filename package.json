@@ -1,0 +1,14 @@
+{
+  "name": "@aloshy-ai/nixhub",
+  "description": "An open-source custom Nix scripts repository. Read source before execute!",
+  "version": "1.0.0",
+  "private": false,
+  "devDependencies": {
+    "@types/react": "^19.0.1",
+    "typescript": "^5.0.0",
+    "vercel": "^32.0.0"
+  },
+  "dependencies": {
+    "next": "^15.1.1"
+  }
+}
