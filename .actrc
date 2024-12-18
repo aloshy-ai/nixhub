@@ -1,0 +1,5 @@
+--container-daemon-socket /var/run/docker.sock
+--artifact-server-path /tmp/artifacts
+--container-architecture linux/amd64
+-P ubuntu-latest=rust:latest
+--bind

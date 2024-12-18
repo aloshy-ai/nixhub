@@ -1,0 +1,48 @@
+name: Update Script Registry
+
+on:
+  push:
+    paths:
+      - 'scripts/**'
+    branches:
+      - main
+
+jobs:
+  update-registry:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+          
+      - name: Generate Script Index
+        run: |
+          mkdir -p scripts
+          
+          echo "[" > scripts/index.json
+          
+          first=true
+          for file in scripts/*; do
+            if [ "$file" = "scripts/index.json" ] || [ -d "$file" ]; then
+              continue
+            fi
+            
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo "," >> scripts/index.json
+            fi
+            
+            filename=$(basename "$file")
+            echo "  \"$filename\"" >> scripts/index.json
+          done
+          
+          echo "]" >> scripts/index.json
+
+      - name: Commit Index
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add scripts/index.json
+          git commit -m "chore: update script index" || exit 0
+          git push
