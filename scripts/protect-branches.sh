@@ -71,7 +71,7 @@ protect_branch() {
     "required_approving_review_count": 1
   },
   "restrictions": null,
-  "allow_force_pushes": false,
+  "allow_force_pushes": true,
   "allow_deletions": false,
   "required_linear_history": true,
   "required_conversation_resolution": true
