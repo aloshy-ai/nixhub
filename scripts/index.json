@@ -1,3 +1,5 @@
 [
+  "index.d.ts"
+,
   "protect-branches.sh"
 ]
