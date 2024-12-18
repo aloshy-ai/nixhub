@@ -5,6 +5,21 @@ PARALLEL_JOBS=5
 DRY_RUN=false
 
 # ===== FUNCTIONS =====
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local msg="$2"
+    
+    while kill -0 $pid 2>/dev/null; do
+        local temp=${spinstr#?}
+        printf "\r\033[K[%c] %s" "$spinstr" "$msg"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+    done
+    printf "\r\033[K"
+}
+
 check_auth() {
     echo "🔍 Checking GitHub authentication..."
     gh auth status > auth_status.tmp 2>&1
@@ -21,7 +36,6 @@ check_auth() {
         gh auth login --scopes 'repo' || exit 1
     fi
 
-    echo "✅ Authentication check passed."
     rm auth_status.tmp
 }
 
@@ -29,16 +43,23 @@ protect_branch() {
     local repo="$1"
     local branch="$2"
 
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo "🧪 [DRY RUN] Would protect $branch in $repo"
+    # Check dry run
+    [ "$DRY_RUN" = "true" ] && {
+        echo "[DRY RUN] Would protect $branch in $repo"
         return 0
-    fi
+    }
 
-    if gh api "/repos/$repo/branches/$branch" &>/dev/null; then
-        echo "🔒 Protecting $branch in $repo..."
-        if gh api --method PUT "/repos/$repo/branches/$branch/protection" \
-            -H "Accept: application/vnd.github+json" \
-            --input - <<EOF
+    # Check if branch exists
+    gh api "/repos/$repo/branches/$branch" &>/dev/null || {
+        echo "⏩ Skipping $repo ($branch not found)"
+        return 0
+    }
+
+    # Protect branch
+    gh api --method PUT "/repos/$repo/branches/$branch/protection" \
+        -H "Accept: application/vnd.github+json" \
+        --silent \
+        --input - > protection_result.tmp 2>&1 <<EOF &
 {
   "required_status_checks": {
     "strict": true,
@@ -56,29 +77,38 @@ protect_branch() {
   "required_conversation_resolution": true
 }
 EOF
-        then
-            echo "✅ Protected $branch in $repo"
-            return 0
-        else
-            echo "❌ Failed to protect $branch in $repo"
-            return 1
-        fi
-    else
-        echo "ℹ️ Branch $branch not found in $repo. Skipping..."
+
+    local pid=$!
+    spinner $pid "Protecting $repo ($branch)"
+    wait $pid
+    local status=$?
+
+    if [ $status -eq 0 ]; then
+        echo "✅ Protected $repo ($branch)"
+        rm -f protection_result.tmp
         return 0
+    else
+        echo "❌ Failed to protect $repo ($branch)"
+        rm -f protection_result.tmp
+        return 1
     fi
 }
 
 export -f protect_branch
+export -f spinner
 export DRY_RUN
 
 # ===== MAIN SCRIPT =====
-echo "🚀 Starting GitHub branch protection script..."
+echo "🚀 Starting branch protection..."
 check_auth
 
-echo "📜 Fetching and processing public repositories..."
-gh repo list --json nameWithOwner,isPrivate --jq '.[] | select(.isPrivate==false) | .nameWithOwner' | \
-parallel -j "$PARALLEL_JOBS" --bar \
-    'for branch in main master; do protect_branch {} "$branch"; done'
+echo "📜 Processing repositories..."
+gh repo list --json nameWithOwner,isPrivate --jq '.[] | select(.isPrivate==false) | .nameWithOwner' 2>/dev/null | \
+parallel --will-cite -j "$PARALLEL_JOBS" \
+    'if gh api "/repos/{}/branches/main" &>/dev/null; then
+        protect_branch {} "main"
+    else
+        protect_branch {} "master"
+    fi'
 
-echo "🎉 Script completed!"
+echo "✨ Done!"

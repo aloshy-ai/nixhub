@@ -23,6 +23,7 @@
             nixfmt-rfc-style
             nodejs_20
             watchexec
+            parallel
             git
             curl
             jq
