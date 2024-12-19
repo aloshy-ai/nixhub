@@ -3,7 +3,6 @@
 # ===== CONFIGURATION =====
 PARALLEL_JOBS=5
 DRY_RUN=false
-# Add repositories to exclude, comma-separated
 EXCLUDED_REPOS=""
 
 # ===== FUNCTIONS =====
@@ -127,6 +126,57 @@ EOF
     fi
 }
 
+# Define the worker script that will be used by parallel
+read -r -d '' WORKER_SCRIPT << 'WRKEREOF'
+protect_branch() {
+    local repo="$1"
+    local branch="$2"
+
+    # Check if user is admin
+    if gh api "/repos/$repo" --jq '.permissions.admin' 2>/dev/null | grep -q "true"; then
+        echo "⏩ Skipping $repo (admin repository)"
+        return 0
+    fi
+
+    # Check if branch exists
+    if ! gh api "/repos/$repo/branches/$branch" &>/dev/null; then
+        echo "⏩ Skipping $repo ($branch not found)"
+        return 0
+    fi
+
+    # Protect branch
+    if gh api --method PUT "/repos/$repo/branches/$branch/protection" \
+        -H "Accept: application/vnd.github+json" \
+        --input - <<INNEREOF
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": []
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "required_approving_review_count": 1
+  },
+  "restrictions": null,
+  "allow_force_pushes": true,
+  "allow_deletions": false,
+  "required_linear_history": true,
+  "required_conversation_resolution": true
+}
+INNEREOF
+    then
+        echo "✅ Protected $repo ($branch)"
+        return 0
+    else
+        echo "❌ Failed to protect $repo ($branch)"
+        return 1
+    fi
+}
+
+protect_branch "$1" "$2"
+WRKEREOF
+
 # ===== MAIN SCRIPT =====
 echo "🚀 Starting branch protection..."
 check_auth
@@ -134,10 +184,6 @@ check_auth
 echo "📜 Processing repositories..."
 gh repo list --json nameWithOwner,isPrivate --jq '.[] | select(.isPrivate==false) | .nameWithOwner' 2>/dev/null | \
 parallel --will-cite -j "$PARALLEL_JOBS" \
-    'if gh api "/repos/{}/branches/main" &>/dev/null; then
-        protect_branch {} "main"
-    else
-        protect_branch {} "master"
-    fi'
+    "bash -c \$'$WORKER_SCRIPT' _ {} main || bash -c \$'$WORKER_SCRIPT' _ {} master"
 
 echo "✨ Done!"
