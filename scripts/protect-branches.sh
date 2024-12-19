@@ -71,25 +71,26 @@ protect_branch() {
     if is_admin "$repo"; then
         echo "⏩ Skipping $repo (admin repository)"
         return 0
-    }
+    fi
 
     # Check dry run
-    [ "$DRY_RUN" = "true" ] && {
+    if [ "$DRY_RUN" = "true" ]; then
         echo "[DRY RUN] Would protect $branch in $repo"
         return 0
-    }
+    fi
 
     # Check if branch exists
-    gh api "/repos/$repo/branches/$branch" &>/dev/null || {
+    if ! gh api "/repos/$repo/branches/$branch" &>/dev/null; then
         echo "⏩ Skipping $repo ($branch not found)"
         return 0
-    }
+    fi
 
     # Protect branch
-    gh api --method PUT "/repos/$repo/branches/$branch/protection" \
-        -H "Accept: application/vnd.github+json" \
-        --silent \
-        --input - > protection_result.tmp 2>&1 <<EOF &
+    {
+        gh api --method PUT "/repos/$repo/branches/$branch/protection" \
+            -H "Accept: application/vnd.github+json" \
+            --silent \
+            --input - > protection_result.tmp 2>&1 <<EOF
 {
   "required_status_checks": {
     "strict": true,
@@ -107,6 +108,7 @@ protect_branch() {
   "required_conversation_resolution": true
 }
 EOF
+    } &
 
     local pid=$!
     spinner $pid "Protecting $repo ($branch)"
@@ -124,13 +126,6 @@ EOF
         return 1
     fi
 }
-
-export -f protect_branch
-export -f spinner
-export -f is_excluded_repo
-export -f is_admin
-export DRY_RUN
-export EXCLUDED_REPOS
 
 # ===== MAIN SCRIPT =====
 echo "🚀 Starting branch protection..."
