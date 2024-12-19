@@ -3,6 +3,8 @@
 # ===== CONFIGURATION =====
 PARALLEL_JOBS=5
 DRY_RUN=false
+# Add repositories to exclude, comma-separated
+EXCLUDED_REPOS=""
 
 # ===== FUNCTIONS =====
 spinner() {
@@ -10,7 +12,7 @@ spinner() {
     local delay=0.1
     local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
     local msg="$2"
-    
+
     while kill -0 $pid 2>/dev/null; do
         local temp=${spinstr#?}
         printf "\r\033[K[%c] %s" "$spinstr" "$msg"
@@ -23,7 +25,7 @@ spinner() {
 check_auth() {
     echo "🔍 Checking GitHub authentication..."
     gh auth status > auth_status.tmp 2>&1
-    
+
     if ! grep -q "Logged in to github.com" auth_status.tmp; then
         echo "❌ Not logged in to GitHub. Logging in..."
         rm auth_status.tmp
@@ -39,9 +41,37 @@ check_auth() {
     rm auth_status.tmp
 }
 
+is_excluded_repo() {
+    local repo="$1"
+    if [[ -n "$EXCLUDED_REPOS" && ",$EXCLUDED_REPOS," == *",$repo,"* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+is_admin() {
+    local repo="$1"
+    if gh api "/repos/$repo" --jq '.permissions.admin' 2>/dev/null | grep -q "true"; then
+        return 0
+    fi
+    return 1
+}
+
 protect_branch() {
     local repo="$1"
     local branch="$2"
+
+    # Check if repo is in exclusion list
+    if is_excluded_repo "$repo"; then
+        echo "⏩ Skipping $repo (in exclusion list)"
+        return 0
+    fi
+
+    # Check if user is admin
+    if is_admin "$repo"; then
+        echo "⏩ Skipping $repo (admin repository)"
+        return 0
+    }
 
     # Check dry run
     [ "$DRY_RUN" = "true" ] && {
@@ -65,7 +95,7 @@ protect_branch() {
     "strict": true,
     "contexts": []
   },
-  "enforce_admins": true,
+  "enforce_admins": false,
   "required_pull_request_reviews": {
     "dismiss_stale_reviews": true,
     "required_approving_review_count": 1
@@ -89,6 +119,7 @@ EOF
         return 0
     else
         echo "❌ Failed to protect $repo ($branch)"
+        cat protection_result.tmp
         rm -f protection_result.tmp
         return 1
     fi
@@ -96,7 +127,10 @@ EOF
 
 export -f protect_branch
 export -f spinner
+export -f is_excluded_repo
+export -f is_admin
 export DRY_RUN
+export EXCLUDED_REPOS
 
 # ===== MAIN SCRIPT =====
 echo "🚀 Starting branch protection..."
