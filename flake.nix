@@ -27,6 +27,7 @@
             git
             curl
             jq
+            gh
           ];
 
           shellHook = ''
