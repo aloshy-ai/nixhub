@@ -1,0 +1,15 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: nixos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Tests in Nix Shell
+        run: |
+              nix develop --command bash -c 'just test'

@@ -24,6 +24,7 @@
             nodejs_20
             watchexec
             parallel
+            direnv
             husky
             curl
             just
