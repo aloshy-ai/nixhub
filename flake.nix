@@ -34,10 +34,13 @@
           ];
 
           shellHook = ''
-            npm i
+            npm install
             chmod +x ./run
-            chmod +x ./scripts/*
-            chmod +x ./scripts/tests/*
+            chmod -R +x ./scripts/*
+            chmod -R +x ./scripts/tests/*
+            chmod -R +x ./.husky/*
+            chmod -R +x ./.github/*
+            git config core.hooksPath .husky
             echo "░░░░░░░░░░  𝓷𝓲𝔁🅷🆄🅱  ░░░░░░░░░░"
           '';
         };
