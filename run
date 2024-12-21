@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+
+# Script configuration
+REPO_OWNER="aloshy-ai"
+REPO_NAME="nixhub"
+REPO_BRANCH="main"
+SCRIPTS_PATH="scripts"
+REPO_URL="https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/$REPO_BRANCH/$SCRIPTS_PATH"
+SCRIPT_NAME="nix-script-wrapper"
+
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Print usage information
+print_usage() {
+    cat << EOF
+Usage: $SCRIPT_NAME [COMMAND] [OPTIONS]
+
+A general wrapper for running scripts through nix-shell.
+
+Commands:
+    run               Run a script (default command if --script is specified)
+    list              List available scripts from the repository
+
+Options:
+    -s, --script NAME   Name of the script to run (e.g., github-config)
+    -l, --local         Run using local script (must be in same directory)
+    -r, --remote        Run using remote script from GitHub (default)
+    -d, --dry-run      Run in dry-run mode without making changes
+    -j, --jobs NUM     Number of parallel jobs (default: 5)
+    -e, --exclude LIST Exclude items from processing (comma-separated list)
+    -p, --packages LIST Additional nix packages to include (comma-separated list)
+    -v, --vars LIST    Additional environment variables (comma-separated KEY=VALUE list)
+    -h, --help         Show this help message
+
+Examples:
+    $SCRIPT_NAME list
+    $SCRIPT_NAME run --script=github-config --dry-run --jobs=3
+    $SCRIPT_NAME --script=github-config --local --packages="git,curl"
+EOF
+}
+
+# Error handling
+error() {
+    echo -e "${RED}Error: $1${NC}" >&2
+    exit 1
+}
+
+# Warning messages
+warn() {
+    echo -e "${YELLOW}Warning: $1${NC}" >&2
+}
+
+# Success messages
+success() {
+    echo -e "${GREEN}$1${NC}"
+}
+
+# Check if a command exists
+check_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        error "$1 is not installed. Please install it first."
+    fi
+}
+
+# List available scripts
+list_scripts() {
+    echo -e "${BLUE}Fetching available scripts from $REPO_OWNER/$REPO_NAME...${NC}"
+
+    # Check for required commands
+    check_command "curl"
+    check_command "jq"
+
+    # Fetch the directory listing using GitHub API
+    local api_url="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$SCRIPTS_PATH?ref=$REPO_BRANCH"
+    local response
+
+    response=$(curl -s "$api_url")
+
+    if [[ $(echo "$response" | jq -r 'type') != "array" ]]; then
+        error "Failed to fetch scripts listing"
+    fi
+
+    echo -e "\nAvailable scripts:"
+    echo "=================="
+
+    # Parse and display the results
+    echo "$response" | jq -r '.[] | select(.type == "file") | .name' | while read -r script; do
+        # Fetch the first line of the script to get any comment description
+        local script_url="$REPO_URL/$script"
+        local first_line
+        first_line=$(curl -s "$script_url" | head -n 1)
+
+        # Check if the first line is a comment and use it as description
+        if [[ $first_line == \#* ]]; then
+            description="${first_line#\# }"
+            echo -e "${GREEN}$script${NC} - $description"
+        else
+            echo -e "${GREEN}$script${NC}"
+        fi
+    done
+    echo "=================="
+}
+
+# Parse comma-separated list into space-separated list
+parse_list() {
+    echo "$1" | tr ',' ' '
+}
+
+# Run script
+run_script() {
+    local script_name="$1"
+    shift
+
+    # Prepare the command
+    local cmd=""
+    if [ "$use_local" = true ]; then
+        if [ ! -f "./$script_name" ]; then
+            error "Local script '$script_name' not found in current directory"
+        fi
+        cmd="./$script_name"
+    else
+        # Check if the script exists first
+        if ! curl -s -f "$REPO_URL/$script_name" > /dev/null; then
+            error "Remote script '$script_name' not found"
+            return 1
+        fi
+        cmd="bash <(curl -L $REPO_URL/$script_name)"
+    fi
+
+    # Add options to the command
+    local nix_cmd="nix-shell -p $(echo $packages) --run"
+
+    # Set environment variables
+    [ "$dry_run" = true ] && env_vars+=" DRY_RUN=true"
+    [ -n "$jobs" ] && env_vars+=" PARALLEL_JOBS=$jobs"
+    [ -n "$exclude" ] && env_vars+=" EXCLUDED_ITEMS='$exclude'"
+
+    # Debug output
+    if [[ "${DEBUG:-false}" == "true" ]]; then
+        echo "Running with:"
+        echo "Script: $script_name"
+        echo "Packages: $packages"
+        echo "Environment variables: $env_vars"
+        echo "Command: $cmd"
+    fi
+
+    # Construct and execute the final command
+    if [ -n "$env_vars" ]; then
+        eval "$nix_cmd \"$env_vars $cmd\""
+    else
+        eval "$nix_cmd \"$cmd\""
+    fi
+}
+
+# Main script execution
+main() {
+    local script_name=""
+    local use_local=false
+    local dry_run=false
+    local jobs=5
+    local exclude=""
+    local packages="gh parallel jq" # Default packages
+    local env_vars=""
+    local command=""
+
+    # Handle commands without options
+    case $1 in
+        list)
+            list_scripts
+            exit 0
+            ;;
+        run)
+            command="run"
+            shift
+            ;;
+    esac
+
+    # Parse command line arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -s=*|--script=*)
+                script_name="${1#*=}"
+                command="run"
+                shift
+                ;;
+            -l|--local)
+                use_local=true
+                shift
+                ;;
+            -r|--remote)
+                use_local=false
+                shift
+                ;;
+            -d|--dry-run)
+                dry_run=true
+                shift
+                ;;
+            -j=*|--jobs=*)
+                jobs="${1#*=}"
+                shift
+                ;;
+            -e=*|--exclude=*)
+                exclude="${1#*=}"
+                shift
+                ;;
+            -p=*|--packages=*)
+                packages="$packages $(parse_list "${1#*=}")"
+                shift
+                ;;
+            -v=*|--vars=*)
+                IFS=',' read -ra VARS <<< "${1#*=}"
+                for var in "${VARS[@]}"; do
+                    env_vars+=" $var"
+                done
+                shift
+                ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            *)
+                error "Unknown option: $1"
+                ;;
+        esac
+    done
+
+    # Handle commands
+    case $command in
+        run)
+            if [ -z "$script_name" ]; then
+                error "No script specified. Use --script=SCRIPT_NAME to specify a script."
+            fi
+            check_command "nix-shell"
+            run_script "$script_name"
+            ;;
+        "")
+            print_usage
+            exit 1
+            ;;
+    esac
+}
+
+# Execute main function with all arguments
+main "$@"

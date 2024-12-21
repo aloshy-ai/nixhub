@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+
+# Enable error tracing
+set -E
+trap 'code=$?; echo "Error on line $LINENO: Command \"$BASH_COMMAND\" exited with status $code"' ERR
+
+# ===== TEST CONFIGURATION =====
+TEST_DIR=$(mktemp -d)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd ../.. && pwd)"
+SCRIPT="$SCRIPT_DIR/run"
+MOCK_DIR="$TEST_DIR/mock"
+TOTAL_TESTS=0
+PASSED_TESTS=0
+FAILED_TESTS=0
+ORIGINAL_DIR=$(pwd)
+CLEANUP_RUN=0
+
+# Enable debug output
+DEBUG=${DEBUG:-false}
+
+# ===== TEST UTILITIES =====
+debug() {
+    if [ "$DEBUG" = "true" ]; then
+        echo "DEBUG: $*" >&2
+    fi
+}
+
+print_header() {
+    echo "🧪 Running tests for nix script wrapper..."
+    echo "================================================"
+    debug "Test directory: $TEST_DIR"
+    debug "Script directory: $SCRIPT_DIR"
+    debug "Script path: $SCRIPT"
+    debug "Mock directory: $MOCK_DIR"
+}
+
+print_summary() {
+    echo "================================================"
+    echo "📊 Test Summary:"
+    echo "Total tests: $TOTAL_TESTS"
+    echo "✅ Passed: $PASSED_TESTS"
+    echo "❌ Failed: $FAILED_TESTS"
+    echo "================================================"
+}
+
+assert() {
+    local message="$1"
+    local command="$2"
+    local expected_status="$3"
+    local expected_output="${4:-}"
+
+    echo -n "Testing $message... "
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+    # Capture both stdout and stderr, but keep them separate
+    local output_file="${TEST_DIR}/output.$$"
+    local error_file="${TEST_DIR}/error.$$"
+
+    # Execute command in subshell to prevent ERR trap from triggering
+    (
+        set +E
+        eval "$command" > "$output_file" 2> "$error_file"
+        echo $? > "${TEST_DIR}/status.$$"
+    )
+    local status=$(<"${TEST_DIR}/status.$$")
+
+    # Combine output and error for checking
+    local output
+    output="$(<"$output_file")"$'\n'"$(<"$error_file")"
+    rm -f "$output_file" "$error_file" "${TEST_DIR}/status.$$"
+
+    if [ $status -eq $expected_status ]; then
+        if [ -n "$expected_output" ]; then
+            if echo "$output" | grep -q "$expected_output"; then
+                echo "✅ Passed"
+                PASSED_TESTS=$((PASSED_TESTS + 1))
+            else
+                echo "❌ Failed (unexpected output)"
+                echo "Expected to contain: $expected_output"
+                echo "Got: $output"
+                FAILED_TESTS=$((FAILED_TESTS + 1))
+            fi
+        else
+            echo "✅ Passed"
+            PASSED_TESTS=$((PASSED_TESTS + 1))
+        fi
+    else
+        echo "❌ Failed (expected $expected_status, got $status)"
+        if [ -n "$output" ]; then
+            echo "Output: $output"
+        fi
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+}
+
+setup() {
+    debug "Setting up test environment..."
+
+    # Verify script exists
+    if [ ! -f "$SCRIPT" ]; then
+        echo "❌ ERROR: Wrapper script not found at $SCRIPT"
+        echo "Please ensure 'run' script exists in the correct location"
+        ls -l "$SCRIPT_DIR"
+        exit 1
+    fi
+
+    # Create mock directory
+    if ! mkdir -p "$MOCK_DIR"; then
+        echo "❌ ERROR: Failed to create mock directory at $MOCK_DIR"
+        exit 1
+    fi
+    debug "Created mock directory: $MOCK_DIR"
+
+    # Setup mocks
+    setup_mocks
+
+    # Change to test directory
+    if ! cd "$TEST_DIR"; then
+        echo "❌ ERROR: Failed to change to test directory"
+        exit 1
+    fi
+    debug "Changed to test directory: $TEST_DIR"
+}
+
+# ===== MOCK FUNCTIONS =====
+setup_mocks() {
+    debug "Setting up mock commands..."
+
+    # Mock curl
+    cat > "$MOCK_DIR/curl" <<'EOF'
+#!/usr/bin/env bash
+
+# Helper function to handle URL checking
+check_url() {
+    local url="$*"
+    if [[ "$url" == *"/nonexistent"* ]]; then
+        echo "404: Not Found" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Helper function to handle GitHub API responses
+handle_api_request() {
+    if [[ "$*" == *"-f"* ]]; then
+        # Handle curl -f (fail on error) flag
+        if ! check_url "$*"; then
+            exit 22  # Curl's exit code for HTTP error
+        fi
+    fi
+
+    case "$*" in
+        *"api.github.com"*)
+            echo '[{"name":"github-config","type":"file"},{"name":"test-script","type":"file"}]'
+            ;;
+        *"raw.githubusercontent.com"*)
+            if ! check_url "$*"; then
+                exit 1
+            fi
+
+            if [[ "$*" == *"head -n 1"* ]]; then
+                echo "# GitHub Repository Configuration Script"
+            else
+                echo "echo 'Mock script execution'"
+            fi
+            ;;
+        *)
+            echo "Mock curl: Unknown URL" >&2
+            exit 1
+            ;;
+    esac
+}
+
+handle_api_request "$@"
+EOF
+    chmod +x "$MOCK_DIR/curl"
+
+    # Mock nix-shell
+    cat > "$MOCK_DIR/nix-shell" <<'EOF'
+#!/usr/bin/env bash
+args=()
+cmd=""
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -p)
+            shift
+            while [[ $# -gt 0 && ! "$1" =~ ^- ]]; do
+                args+=("$1")
+                shift
+            done
+            ;;
+        --run)
+            shift
+            cmd="$1"
+            shift
+            ;;
+        *)
+            args+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ -n "$cmd" ]; then
+    # Execute the command and propagate its exit status
+    (
+        eval "$cmd"
+        exit $?
+    )
+else
+    echo "Mock nix-shell executed with packages: ${args[*]}"
+fi
+EOF
+    chmod +x "$MOCK_DIR/nix-shell"
+
+    # Mock jq
+    cat > "$MOCK_DIR/jq" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-r" ]]; then
+    if [[ "$2" == "type" ]]; then
+        echo "array"
+    elif [[ "$2" == '.[] | select(.type == "file") | .name' ]]; then
+        echo "github-config"
+        echo "test-script"
+    fi
+fi
+EOF
+    chmod +x "$MOCK_DIR/jq"
+
+    export PATH="$MOCK_DIR:$PATH"
+    debug "Mock commands installed in $MOCK_DIR"
+}
+
+# ===== TESTS =====
+test_help() {
+    assert "help command" \
+        "$SCRIPT --help" \
+        0 \
+        "Usage:"
+}
+
+test_list_command() {
+    assert "list command" \
+        "$SCRIPT list" \
+        0 \
+        "Available scripts"
+}
+
+test_run_without_script() {
+    assert "run without script" \
+        "$SCRIPT run" \
+        1 \
+        "No script specified"
+}
+
+test_run_nonexistent_script() {
+    assert "run nonexistent script" \
+        "$SCRIPT --script=nonexistent" \
+        1 \
+        "404: Not Found"
+}
+
+test_run_with_dry_run() {
+    assert "run with dry-run" \
+        "$SCRIPT --script=github-config --dry-run" \
+        0
+}
+
+test_run_with_jobs() {
+    assert "run with jobs" \
+        "$SCRIPT --script=github-config --jobs=3" \
+        0
+}
+
+test_run_with_packages() {
+    assert "run with additional packages" \
+        "$SCRIPT --script=github-config --packages=git,curl" \
+        0
+}
+
+test_run_with_vars() {
+    assert "run with environment variables" \
+        "$SCRIPT --script=github-config --vars=DEBUG=true" \
+        0
+}
+
+test_local_script() {
+    # Create a test local script
+    echo "echo 'Local script executed'" > "$TEST_DIR/test-script"
+    chmod +x "$TEST_DIR/test-script"
+
+    assert "run local script" \
+        "$SCRIPT --script=test-script --local" \
+        0 \
+        "Local script executed"
+}
+
+test_invalid_options() {
+    assert "invalid option" \
+        "$SCRIPT --invalid-option" \
+        1 \
+        "Unknown option"
+}
+
+# ===== CLEANUP =====
+cleanup() {
+    # Only run cleanup once
+    if [ "${CLEANUP_RUN:-0}" -eq 1 ]; then
+        return
+    fi
+    CLEANUP_RUN=1
+
+    echo "🧹 Cleaning up test environment..."
+    if [ -d "$ORIGINAL_DIR" ]; then
+        cd "$ORIGINAL_DIR" 2>/dev/null || true
+    fi
+    if [ -d "$TEST_DIR" ]; then
+        rm -rf "$TEST_DIR" 2>/dev/null || true
+    fi
+    debug "Cleanup completed"
+}
+
+# ===== MAIN =====
+main() {
+    print_header
+    setup
+
+    # Run tests
+    test_help
+    test_list_command
+    test_run_without_script
+    test_run_nonexistent_script
+    test_run_with_dry_run
+    test_run_with_jobs
+    test_run_with_packages
+    test_run_with_vars
+    test_local_script
+    test_invalid_options
+
+    print_summary
+    cleanup
+
+    # Return overall test status
+    [ $FAILED_TESTS -eq 0 ]
+}
+
+# Enable cleanup trap
+trap cleanup EXIT
+
+# Run main function
+main
