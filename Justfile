@@ -6,4 +6,4 @@ default:
 
 # Run tests
 test:
-   ./scripts/tests/*.test
+    for file in ./scripts/tests/*.test; do $file; done

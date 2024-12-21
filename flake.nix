@@ -24,6 +24,7 @@
             nodejs_20
             watchexec
             parallel
+            husky
             curl
             just
             git
@@ -33,6 +34,7 @@
 
           shellHook = ''
             npm i
+            chmod +x ./run
             chmod +x ./scripts/*
             chmod +x ./scripts/tests/*
             echo "░░░░░░░░░░  𝓷𝓲𝔁🅷🆄🅱  ░░░░░░░░░░"
