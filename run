@@ -60,20 +60,9 @@ success() {
     echo -e "${GREEN}$1${NC}"
 }
 
-# Check if a command exists
-check_command() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        error "$1 is not installed. Please install it first."
-    fi
-}
-
 # List available scripts
 list_scripts() {
     echo -e "${BLUE}Fetching available scripts from $REPO_OWNER/$REPO_NAME...${NC}"
-
-    # Check for required commands
-    check_command "curl"
-    check_command "jq"
 
     # Fetch the directory listing using GitHub API
     local api_url="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$SCRIPTS_PATH?ref=$REPO_BRANCH"
@@ -235,7 +224,7 @@ main() {
             if [ -z "$script_name" ]; then
                 error "No script specified. Use --script=SCRIPT_NAME to specify a script."
             fi
-            check_command "nix-shell"
+
             run_script "$script_name"
             ;;
         "")
