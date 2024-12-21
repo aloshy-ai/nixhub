@@ -4,9 +4,3 @@
 # Exclude all .env files except Direnv file
 .env*
 !.envrc
-
-# Edge function files
-node_modules
-.vercel
-.next
-.DS_Store
