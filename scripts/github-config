@@ -67,12 +67,6 @@ protect_branch() {
         return 0
     fi
 
-    # Check if user is admin
-    if is_admin "$repo"; then
-        echo "⏩ Skipping $repo (admin repository)"
-        return 0
-    }
-
     # Check dry run
     [ "$DRY_RUN" = "true" ] && {
         echo "[DRY RUN] Would protect $branch in $repo"
@@ -85,6 +79,17 @@ protect_branch() {
         return 0
     }
 
+    # Set review requirements based on admin status
+    local review_requirements
+    if is_admin "$repo"; then
+        review_requirements='"required_pull_request_reviews": null'
+    else
+        review_requirements='"required_pull_request_reviews": {
+            "dismiss_stale_reviews": true,
+            "required_approving_review_count": 1
+        }'
+    fi
+
     # Protect branch
     gh api --method PUT "/repos/$repo/branches/$branch/protection" \
         -H "Accept: application/vnd.github+json" \
@@ -96,10 +101,7 @@ protect_branch() {
     "contexts": []
   },
   "enforce_admins": false,
-  "required_pull_request_reviews": {
-    "dismiss_stale_reviews": true,
-    "required_approving_review_count": 1
-  },
+  ${review_requirements},
   "restrictions": null,
   "allow_force_pushes": true,
   "allow_deletions": false,
