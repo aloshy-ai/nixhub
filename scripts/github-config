@@ -3,6 +3,7 @@
 # ===== CONFIGURATION =====
 PARALLEL_JOBS=5
 DRY_RUN=false
+# Add repositories to exclude, comma-separated
 EXCLUDED_REPOS=""
 
 # ===== FUNCTIONS =====
@@ -66,40 +67,41 @@ protect_branch() {
         return 0
     fi
 
-    # Check if user is admin
-    if is_admin "$repo"; then
-        echo "⏩ Skipping $repo (admin repository)"
-        return 0
-    fi
-
     # Check dry run
-    if [ "$DRY_RUN" = "true" ]; then
+    [ "$DRY_RUN" = "true" ] && {
         echo "[DRY RUN] Would protect $branch in $repo"
         return 0
-    fi
+    }
 
     # Check if branch exists
-    if ! gh api "/repos/$repo/branches/$branch" &>/dev/null; then
+    gh api "/repos/$repo/branches/$branch" &>/dev/null || {
         echo "⏩ Skipping $repo ($branch not found)"
         return 0
+    }
+
+    # Set review requirements based on admin status
+    local review_requirements
+    if is_admin "$repo"; then
+        review_requirements='"required_pull_request_reviews": null'
+    else
+        review_requirements='"required_pull_request_reviews": {
+            "dismiss_stale_reviews": true,
+            "required_approving_review_count": 1
+        }'
     fi
 
     # Protect branch
-    {
-        gh api --method PUT "/repos/$repo/branches/$branch/protection" \
-            -H "Accept: application/vnd.github+json" \
-            --silent \
-            --input - > protection_result.tmp 2>&1 <<EOF
+    gh api --method PUT "/repos/$repo/branches/$branch/protection" \
+        -H "Accept: application/vnd.github+json" \
+        --silent \
+        --input - > protection_result.tmp 2>&1 <<EOF &
 {
   "required_status_checks": {
     "strict": true,
     "contexts": []
   },
   "enforce_admins": false,
-  "required_pull_request_reviews": {
-    "dismiss_stale_reviews": true,
-    "required_approving_review_count": 1
-  },
+  ${review_requirements},
   "restrictions": null,
   "allow_force_pushes": true,
   "allow_deletions": false,
@@ -107,7 +109,6 @@ protect_branch() {
   "required_conversation_resolution": true
 }
 EOF
-    } &
 
     local pid=$!
     spinner $pid "Protecting $repo ($branch)"
@@ -126,56 +127,12 @@ EOF
     fi
 }
 
-# Define the worker script that will be used by parallel
-read -r -d '' WORKER_SCRIPT << 'WRKEREOF'
-protect_branch() {
-    local repo="$1"
-    local branch="$2"
-
-    # Check if user is admin
-    if gh api "/repos/$repo" --jq '.permissions.admin' 2>/dev/null | grep -q "true"; then
-        echo "⏩ Skipping $repo (admin repository)"
-        return 0
-    fi
-
-    # Check if branch exists
-    if ! gh api "/repos/$repo/branches/$branch" &>/dev/null; then
-        echo "⏩ Skipping $repo ($branch not found)"
-        return 0
-    fi
-
-    # Protect branch
-    if gh api --method PUT "/repos/$repo/branches/$branch/protection" \
-        -H "Accept: application/vnd.github+json" \
-        --input - <<INNEREOF
-{
-  "required_status_checks": {
-    "strict": true,
-    "contexts": []
-  },
-  "enforce_admins": false,
-  "required_pull_request_reviews": {
-    "dismiss_stale_reviews": true,
-    "required_approving_review_count": 1
-  },
-  "restrictions": null,
-  "allow_force_pushes": true,
-  "allow_deletions": false,
-  "required_linear_history": true,
-  "required_conversation_resolution": true
-}
-INNEREOF
-    then
-        echo "✅ Protected $repo ($branch)"
-        return 0
-    else
-        echo "❌ Failed to protect $repo ($branch)"
-        return 1
-    fi
-}
-
-protect_branch "$1" "$2"
-WRKEREOF
+export -f protect_branch
+export -f spinner
+export -f is_excluded_repo
+export -f is_admin
+export DRY_RUN
+export EXCLUDED_REPOS
 
 # ===== MAIN SCRIPT =====
 echo "🚀 Starting branch protection..."
@@ -184,6 +141,10 @@ check_auth
 echo "📜 Processing repositories..."
 gh repo list --json nameWithOwner,isPrivate --jq '.[] | select(.isPrivate==false) | .nameWithOwner' 2>/dev/null | \
 parallel --will-cite -j "$PARALLEL_JOBS" \
-    "bash -c \$'$WORKER_SCRIPT' _ {} main || bash -c \$'$WORKER_SCRIPT' _ {} master"
+    'if gh api "/repos/{}/branches/main" &>/dev/null; then
+        protect_branch {} "main"
+    else
+        protect_branch {} "master"
+    fi'
 
 echo "✨ Done!"

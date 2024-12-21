@@ -24,14 +24,17 @@
             nodejs_20
             watchexec
             parallel
-            git
             curl
+            just
+            git
             jq
             gh
           ];
 
           shellHook = ''
             npm i
+            chmod +x ./scripts/*
+            chmod +x ./scripts/tests/*
             echo "░░░░░░░░░░  𝓷𝓲𝔁🅷🆄🅱  ░░░░░░░░░░"
           '';
         };

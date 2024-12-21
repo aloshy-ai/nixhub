@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+
+# Enable error tracing
+set -E
+trap 'echo "Error on line $LINENO"' ERR
+
+# ===== TEST CONFIGURATION =====
+# Test environment setup
+TEST_DIR=$(mktemp -d)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
+SCRIPT="$SCRIPT_DIR/github-config"
+MOCK_DIR="$TEST_DIR/mock"
+TEST_REPO="test-protection/test-repo"
+TOTAL_TESTS=0
+PASSED_TESTS=0
+FAILED_TESTS=0
+
+# Enable debug output
+DEBUG=${DEBUG:-false}
+
+# ===== DEBUG UTILITIES =====
+debug() {
+    if [ "$DEBUG" = "true" ]; then
+        echo "DEBUG: $*" >&2
+    fi
+}
+
+# ===== TEST UTILITIES =====
+print_header() {
+    echo "🧪 Running tests for branch protection script..."
+    echo "================================================"
+}
+
+print_summary() {
+    echo "================================================"
+    echo "📊 Test Summary:"
+    echo "Total tests: $TOTAL_TESTS"
+    echo "✅ Passed: $PASSED_TESTS"
+    echo "❌ Failed: $FAILED_TESTS"
+    echo "================================================"
+}
+
+assert() {
+    local message="$1"
+    local command="$2"
+    local expected_status="$3"
+    local expected_output="$4"
+
+    echo -n "Testing $message... "
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+    local output
+    output=$(eval "$command" 2>&1)
+    local status=$?
+
+    if [ $status -eq $expected_status ]; then
+        if [ -n "$expected_output" ]; then
+            if echo "$output" | grep -q "$expected_output"; then
+                echo "✅ Passed"
+                PASSED_TESTS=$((PASSED_TESTS + 1))
+            else
+                echo "❌ Failed (unexpected output)"
+                echo "Expected to contain: $expected_output"
+                echo "Got: $output"
+                FAILED_TESTS=$((FAILED_TESTS + 1))
+            fi
+        else
+            echo "✅ Passed"
+            PASSED_TESTS=$((PASSED_TESTS + 1))
+        fi
+    else
+        echo "❌ Failed (expected $expected_status, got $status)"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+}
+
+setup() {
+    echo "🔧 Setting up test environment..."
+
+    # Debug information
+    debug "Current directory: $(pwd)"
+    debug "SCRIPT_DIR: $SCRIPT_DIR"
+    debug "TEST_DIR: $TEST_DIR"
+    debug "SCRIPT path: $SCRIPT"
+
+    # Create mock directory with error checking
+    if ! mkdir -p "$MOCK_DIR"; then
+        echo "❌ ERROR: Failed to create mock directory at $MOCK_DIR"
+        exit 1
+    fi
+    debug "Created mock directory: $MOCK_DIR"
+
+    # Verify source script exists
+    if [ ! -f "$SCRIPT" ]; then
+        echo "❌ ERROR: Source script not found at $SCRIPT"
+        echo "Please ensure github-config script exists in the correct location"
+        ls -l "$SCRIPT_DIR"
+        exit 1
+    fi
+
+    # Copy the script to test directory with error checking
+    if ! cp "$SCRIPT" "$TEST_DIR/github-config"; then
+        echo "❌ ERROR: Failed to copy script to test directory"
+        exit 1
+    fi
+    debug "Copied script to: $TEST_DIR/github-config"
+
+    # Make script executable with error checking
+    if ! chmod +x "$TEST_DIR/github-config"; then
+        echo "❌ ERROR: Failed to make script executable"
+        exit 1
+    fi
+    debug "Made script executable"
+
+    # Change to test directory with error checking
+    if ! cd "$TEST_DIR"; then
+        echo "❌ ERROR: Failed to change to test directory"
+        exit 1
+    fi
+    debug "Changed to test directory: $TEST_DIR"
+}
+
+cleanup() {
+    echo "🧹 Cleaning up test environment..."
+    cd - >/dev/null || exit 1
+    rm -rf "$TEST_DIR"
+}
+
+require_util() {
+    command -v "$1" > /dev/null 2>&1 || oops "you do not have '$1' installed, which I need to $2"
+}
+
+# ===== MOCK FUNCTIONS =====
+mock_gh() {
+    debug "Setting up mock gh command..."
+    mkdir -p "$MOCK_DIR"
+    cat <<'EOF' > "$MOCK_DIR/gh"
+#!/usr/bin/env bash
+
+handle_protection() {
+    local input
+    input=$(cat)
+    debug "Protection payload: $input"
+    if [[ "$*" == *"test-protection/test-repo"* ]]; then
+        if echo "$input" | grep -q '"required_pull_request_reviews": null'; then
+            return 0
+        else
+            return 1
+        fi
+    else
+        if echo "$input" | grep -q '"required_approving_review_count": 1'; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+}
+
+debug() {
+    if [ "${DEBUG:-false}" = "true" ]; then
+        echo "MOCK DEBUG: $*" >&2
+    fi
+}
+
+debug "Mock gh called with args: $*"
+
+case "$*" in
+    "auth status")
+        echo "Logged in to github.com"
+        echo "Token scopes: repo"
+        ;;
+    *"api /repos/test-protection/test-repo"*)
+        echo '{"permissions":{"admin":true}}'
+        ;;
+    *"api /repos/non-admin-repo"*)
+        echo '{"permissions":{"admin":false}}'
+        ;;
+    *"api /repos/"*"/branches/main"*)
+        debug "Checking main branch"
+        exit 0
+        ;;
+    *"api /repos/"*"/branches/master"*)
+        debug "Checking master branch"
+        exit 1
+        ;;
+    "repo list"*)
+        echo "test-protection/test-repo"
+        echo "non-admin-repo/test"
+        ;;
+    *"api --method PUT /repos/"*"/branches/"*"/protection"*)
+        debug "Setting branch protection"
+        handle_protection "$@"
+        exit $?
+        ;;
+    *)
+        echo "Mock gh: Unknown command: $*" >&2
+        exit 1
+        ;;
+esac
+EOF
+    chmod +x "$MOCK_DIR/gh"
+    export PATH="$MOCK_DIR:$PATH"
+    debug "Mock gh command installed at $MOCK_DIR/gh"
+}
+
+# ===== TESTS =====
+test_dependecy_check() {
+    debug "Running dependency checks"
+    assert "gh command check" \
+        "require_util gh 'run GitHub commands'" \
+        0
+    assert "jq command check" \
+        "require_util jq 'parse JSON data'" \
+        0
+    assert "parallel command check" \
+        "require_util parallel 'run commands in parallel'" \
+        0
+}
+
+test_auth_check() {
+    debug "Running auth check test"
+    assert "GitHub authentication check" \
+        "source ./github-config && check_auth" \
+        0
+}
+
+test_admin_check() {
+    debug "Running admin check test"
+    assert "Admin repository check" \
+        "source ./github-config && is_admin '$TEST_REPO'" \
+        0
+}
+
+test_non_admin_check() {
+    debug "Running non-admin check test"
+    assert "Non-admin repository check" \
+        "source ./github-config && is_admin 'non-admin-repo/test'" \
+        1
+}
+
+test_exclusion_check() {
+    debug "Running exclusion check test"
+    source ./github-config
+    export -f protect_branch
+    export -f spinner
+    export -f is_excluded_repo
+    export -f is_admin
+    assert "Repository exclusion check" \
+        "EXCLUDED_REPOS='test-protection/test-repo' is_excluded_repo '$TEST_REPO'" \
+        0
+}
+
+test_admin_branch_protection() {
+    debug "Running admin branch protection test"
+    assert "Admin repository branch protection" \
+        "source ./github-config && protect_branch '$TEST_REPO' main" \
+        0 \
+        "Protected"
+}
+
+test_non_admin_branch_protection() {
+    debug "Running non-admin branch protection test"
+    assert "Non-admin repository branch protection" \
+        "source ./github-config && protect_branch 'non-admin-repo/test' main" \
+        0 \
+        "Protected"
+}
+
+test_parallel_execution() {
+    debug "Running parallel execution test"
+    source ./github-config
+    export -f protect_branch
+    export -f spinner
+    export -f is_excluded_repo
+    export -f is_admin
+    assert "Parallel execution" \
+        "PARALLEL_JOBS=2 ./github-config" \
+        0
+}
+
+# ===== MAIN =====
+main() {
+    debug "Starting test execution"
+    print_header
+    setup
+
+    debug "Setup complete, creating mock gh command"
+    mock_gh
+    debug "Mock gh command created"
+
+    # Run tests
+    debug "Running tests..."
+    test_dependecy_check
+    test_auth_check
+    test_admin_check
+    test_non_admin_check
+    test_exclusion_check
+    test_admin_branch_protection
+    test_non_admin_branch_protection
+    test_parallel_execution
+    debug "Tests complete"
+
+    print_summary
+    cleanup
+    debug "Cleanup complete"
+
+    # Return overall test status
+    [ $FAILED_TESTS -eq 0 ]
+}
+
+main
